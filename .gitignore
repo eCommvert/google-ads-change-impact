@@ -4,8 +4,9 @@
 # Generated output
 *.html
 
-# Claude Code internal
-.claude/
+# Claude Code internal (keep skills, exclude the rest)
+.claude/*
+!.claude/skills/
 
 # OS
 .DS_Store
