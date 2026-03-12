@@ -188,9 +188,11 @@ df_c["campaign_type_change"] = df_c["Campaign"].map(camp_to_ctype).fillna("Accou
 # ─── 3. Categorise changes ────────────────────────────────────────────────────
 def categorise(row):
     changes = row["Changes"].lower()
+    budget_kw = ["budget","daily budget","shared budget","campaign budget","budget changed",
+                 "budget increased","budget decreased","budget set"]
     bid_kw    = ["bid strategy","target roas","troas","target cpa","tcpa","max conv","maximize conv",
-                 "cpc","roas target","bidding","budget","mac cpc","tolerance","bid limit",
-                 "portfolio strategy","target roas portfolio"]
+                 "cpc","roas target","bidding","mac cpc","tolerance","bid limit",
+                 "portfolio strategy","target roas portfolio","manual cpc","enhanced cpc"]
     conv_kw   = ["conversion","convert"]
     access_kw = ["access","invitation","granted","removed user","permission","activated for",
                  "read only","reports only","standard","admin","notification setting"]
@@ -202,6 +204,7 @@ def categorise(row):
     if any(k in changes for k in report_kw):   return "Report"
     if any(k in changes for k in script_kw):   return "Script/Rule"
     if any(k in changes for k in access_kw):   return "Access/Users"
+    if any(k in changes for k in budget_kw):   return "Budget"
     if any(k in changes for k in conv_kw):     return "Conversion"
     if any(k in changes for k in bid_kw):      return "Bid Strategy"
     return "Other"
@@ -209,13 +212,17 @@ def categorise(row):
 df_c["type"] = df_c.apply(categorise, axis=1)
 
 type_colors = {
+    "Budget":       "#3b82f6",
     "Bid Strategy": "#f59e0b",
     "Conversion":   "#8b5cf6",
-    "Access/Users": "#06b6d4",
     "Script/Rule":  "#10b981",
+    "Access/Users": "#06b6d4",
     "Report":       "#64748b",
     "Other":        "#e94560",
 }
+
+# Types hidden by default (no performance impact)
+HIDDEN_BY_DEFAULT = {"Access/Users", "Report"}
 
 print("  Change types:")
 for t, cnt in df_c["type"].value_counts().items():
@@ -896,7 +903,8 @@ const ALL_USERS   = {J(all_users)};
 const ALL_TYPES   = {J(all_types)};
 
 // ── ANNOTATION STATE ──────────────────────────────────────────────────────────
-const activeTypes = new Set(ALL_TYPES);
+const HIDDEN_DEFAULT = new Set({J(list(HIDDEN_BY_DEFAULT))});
+const activeTypes = new Set(ALL_TYPES.filter(t => !HIDDEN_DEFAULT.has(t)));
 
 // Group annotations by date
 const annotByDate = {{}};
@@ -1303,7 +1311,7 @@ function applyCustomRange() {{
   ALL_TYPES.forEach(type => {{
     const color = TYPE_COLORS[type], cnt = counts[type]||0;
     const div = document.createElement('div');
-    div.className = 'annot-item';
+    div.className = 'annot-item' + (HIDDEN_DEFAULT.has(type) ? ' inactive' : '');
     div.innerHTML = `<div class="annot-swatch" style="background:${{color}}"></div>${{type}}<span class="annot-count">${{cnt}}</span>`;
     div.addEventListener('click', () => {{
       activeTypes.has(type) ? activeTypes.delete(type) : activeTypes.add(type);
