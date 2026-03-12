@@ -1,0 +1,11 @@
+# Sample data (users bring their own)
+*.csv
+
+# Generated output
+*.html
+
+# Claude Code internal
+.claude/
+
+# OS
+.DS_Store
