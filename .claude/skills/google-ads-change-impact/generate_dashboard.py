@@ -75,10 +75,31 @@ df_m = pd.read_csv(METRICS_PATH, skiprows=skip, encoding="utf-8-sig")
 # Normalise column names (strip spaces, handle case variations)
 df_m.columns = df_m.columns.str.strip()
 
-df_m["cost"]          = pd.to_numeric(df_m["Cost"].astype(str).str.replace(",",""), errors="coerce").fillna(0)
-df_m["conv_value"]    = pd.to_numeric(df_m["Conv. value"].astype(str).str.replace(",",""), errors="coerce").fillna(0)
-df_m["conversions"]   = pd.to_numeric(df_m["Conversions"].astype(str).str.replace(",",""), errors="coerce").fillna(0)
-df_m["day"]           = pd.to_datetime(df_m["Day"], errors="coerce")
+# Flexible column matching — handles different Google Ads export formats / languages
+def find_col(df, candidates, required=True):
+    """Find the first matching column from a list of candidates (case-insensitive)."""
+    cols_lower = {c.lower(): c for c in df.columns}
+    for cand in candidates:
+        if cand.lower() in cols_lower:
+            return cols_lower[cand.lower()]
+    if required:
+        print(f"  ⚠ Could not find column. Tried: {candidates}")
+        print(f"    Available: {list(df.columns)}")
+        sys.exit(1)
+    return None
+
+col_day  = find_col(df_m, ["Day", "Date", "day", "date"])
+col_cost = find_col(df_m, ["Cost", "Spend", "cost", "spend", "Ad spend"])
+col_cv   = find_col(df_m, ["Conv. value", "Conversion value", "Conv.value",
+                           "conv_value", "conversion_value", "Conv value", "Revenue"])
+col_conv = find_col(df_m, ["Conversions", "conversions", "Conv.", "Conv"])
+
+print(f"  Columns mapped: day={col_day}, cost={col_cost}, cv={col_cv}, conv={col_conv}")
+
+df_m["cost"]          = pd.to_numeric(df_m[col_cost].astype(str).str.replace(",",""), errors="coerce").fillna(0)
+df_m["conv_value"]    = pd.to_numeric(df_m[col_cv].astype(str).str.replace(",",""), errors="coerce").fillna(0)
+df_m["conversions"]   = pd.to_numeric(df_m[col_conv].astype(str).str.replace(",",""), errors="coerce").fillna(0)
+df_m["day"]           = pd.to_datetime(df_m[col_day], errors="coerce")
 df_m                  = df_m.dropna(subset=["day"])
 
 # Campaign type / subtype (present in newer exports)
@@ -107,7 +128,9 @@ daily = (
 daily["roas"]    = (daily["conv_value"] / daily["cost"].replace(0, float("nan")) * 100).fillna(0).round(2)
 daily["day_str"] = daily["day"].dt.strftime("%Y-%m-%d")
 
-print(f"  → {len(daily)} daily rows, {daily['day'].min().date()} → {daily['day'].max().date()}")
+metrics_min = daily['day'].min()
+metrics_max = daily['day'].max()
+print(f"  → {len(daily)} daily rows, {metrics_min.date()} → {metrics_max.date()}")
 
 # Per-campaign-type daily aggregation (for chart filter)
 daily_ct = (
@@ -198,6 +221,31 @@ print("  Change types:")
 for t, cnt in df_c["type"].value_counts().items():
     print(f"    {t}: {cnt}")
 
+# ─── Date range overlap detection ────────────────────────────────────────────
+changes_min = df_c["datetime"].dropna().min()
+changes_max = df_c["datetime"].dropna().max()
+print(f"\n  Date ranges:")
+print(f"    Metrics : {metrics_min.date()} → {metrics_max.date()}")
+print(f"    Changes : {changes_min.date()} → {changes_max.date()}")
+
+overlap_start = max(metrics_min, changes_min)
+overlap_end   = min(metrics_max, changes_max)
+
+if overlap_start > overlap_end:
+    print("  ⚠ WARNING: No date overlap between metrics and changes!")
+    print("    The dashboard will show metrics but no change annotations.")
+    print("    Please ensure both CSVs cover the same date range.")
+else:
+    overlap_days = (overlap_end - overlap_start).days + 1
+    print(f"    Overlap : {overlap_start.date()} → {overlap_end.date()} ({overlap_days} days)")
+
+    # Count changes outside metrics range
+    changes_before = len(df_c[df_c["datetime"] < metrics_min].dropna(subset=["datetime"]))
+    changes_after  = len(df_c[df_c["datetime"] > metrics_max].dropna(subset=["datetime"]))
+    if changes_before or changes_after:
+        print(f"    ⚠ {changes_before + changes_after} changes fall outside metrics range"
+              f" ({changes_before} before, {changes_after} after) — still included in log & annotations")
+
 # ─── 4. Parse before/after values from change text ─────────────────────────────
 def parse_before_after(text):
     """Extract field → (before, after) pairs from Google Ads change text."""
@@ -275,14 +323,28 @@ cv_data   = daily["conv_value"].round(2).tolist()
 conv_data = daily["conversions"].round(2).tolist()
 roas_data = daily["roas"].tolist()
 
-# Annotations: one entry per change (all, not just top 10)
+# Annotations: one entry per change — snap out-of-range dates to nearest edge
+labels_set = set(labels)
+first_label = labels[0] if labels else None
+last_label  = labels[-1] if labels else None
+
 annotations = []
 for _, row in df_c.dropna(subset=["datetime"]).sort_values("datetime").iterrows():
     ds = row["date_str"]
-    if ds in labels:
-        ba = parse_before_after(row["Changes"])
-        annotations.append({
-            "date":          ds,
+    # If change date falls within metrics range, use it directly
+    # If before metrics start, snap to first date; if after, snap to last date
+    if ds in labels_set:
+        chart_date = ds
+    elif first_label and ds < first_label:
+        chart_date = first_label
+    elif last_label and ds > last_label:
+        chart_date = last_label
+    else:
+        continue  # no labels at all
+    ba = parse_before_after(row["Changes"])
+    annotations.append({
+        "date":          chart_date,
+        "original_date": ds,
             "type":          row["type"],
             "color":         type_colors[row["type"]],
             "user":          row["User"],
@@ -314,6 +376,29 @@ total_changes = len(df_c)
 all_users     = sorted(df_c["User"].unique().tolist())
 all_types     = list(type_colors.keys())
 all_campaigns = sorted(df_c["Campaign"].replace("", "Account-level").unique().tolist())
+
+# Date mismatch banner (shown in dashboard if ranges don't match)
+mismatch_html = ""
+if overlap_start > overlap_end:
+    mismatch_html = (
+        '<div style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);'
+        'border-radius:12px;padding:14px 20px;margin:20px 40px 0;color:#fca5a5;font-size:.82rem">'
+        f'<strong style="color:#ef4444">Date Range Mismatch</strong> — '
+        f'Metrics ({metrics_min.date()} → {metrics_max.date()}) and '
+        f'Changes ({changes_min.date()} → {changes_max.date()}) have no overlapping dates. '
+        'Please re-export with matching ranges for best results.</div>'
+    )
+else:
+    changes_outside = len(df_c[(df_c["datetime"] < metrics_min) | (df_c["datetime"] > metrics_max)].dropna(subset=["datetime"]))
+    if changes_outside > 0:
+        mismatch_html = (
+            '<div style="background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);'
+            'border-radius:12px;padding:14px 20px;margin:20px 40px 0;color:#fcd34d;font-size:.82rem">'
+            f'<strong style="color:#f59e0b">Partial Overlap</strong> — '
+            f'{changes_outside} changes fall outside the metrics date range '
+            f'({metrics_min.date()} → {metrics_max.date()}). '
+            'They are shown in the change log but snapped to the chart edges for annotations.</div>'
+        )
 
 # ─── 7. Serialise to JSON ─────────────────────────────────────────────────────
 print("Building HTML dashboard…")
@@ -688,6 +773,8 @@ html = f"""<!DOCTYPE html>
   </div>
 </div>
 
+{mismatch_html}
+
 <!-- ── CHARTS ── -->
 <div class="section">
   <div class="section-title">Performance Timeline</div>
@@ -849,9 +936,14 @@ function buildPopupHTML(date) {{
   if (!changes.length) return '';
   let h = `<div class="popup-date">${{date}}</div>`;
   changes.slice(0, 5).forEach(c => {{
+    // Show actual date if it was snapped from a different range
+    const realDate = c.original_date && c.original_date !== date
+      ? `<span style="color:var(--amber);font-size:.62rem;margin-left:6px" title="Change occurred outside metrics range">(actual: ${{c.original_date}})</span>`
+      : '';
     h += `<div class="popup-change">
       <div class="popup-change-header">
         <span class="type-badge" style="background:${{c.color}}20;color:${{c.color}};border:1px solid ${{c.color}}40;font-size:.6rem">${{c.type}}</span>
+        ${{realDate}}
         <span class="popup-user">${{c.user}}</span>
       </div>`;
     if (c.campaign && c.campaign !== 'Account-level')
